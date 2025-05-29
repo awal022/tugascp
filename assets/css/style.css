@@ -1,0 +1,6 @@
+
+.card { border-left: 4px solid #1cc88a; }
+.btn-primary { background: #4e73df; }
+.btn-primary:hover { background: #2e59d9; }
+.table th { background: #4e73df; color: white; }
+.img-thumbnail { object-fit: cover; width: 60px; height: 60px; }
