@@ -1,9 +1,10 @@
-
----
-
-### 2. **Setup `.gitignore`**
-
-`.gitignore` berfungsi untuk mengecualikan file/folder tertentu supaya **tidak ikut ke-push** ke GitHub, seperti file konfigurasi lokal, cache, atau file besar yang tidak perlu.
-
-Contoh `.gitignore` untuk proyek PHP web app (qurban-app) sederhana:
-
+.env
+vendor/
+*.log
+cache/
+tmp/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+uploads/tmp/
