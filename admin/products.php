@@ -5,8 +5,6 @@ require_once __DIR__ . '/../config.php';
 requireRole(['admin']);
 
 $title = 'Produk';
-
-// Includes SB Admin 2 template
 include __DIR__ . '/../includes/header.php';
 include __DIR__ . '/../includes/sidebar.php';
 include __DIR__ . '/../includes/navbar.php';
@@ -35,56 +33,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah'])) {
     exit;
 }
 
-// Handle edit produk
+// Handle edit produk via modal
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit'])) {
-    $id         = (int) $_POST['id'];
+    $id         = (int)   $_POST['id'];
     $nama       = escape($_POST['nama']);
     $deskripsi  = escape($_POST['deskripsi']);
     $harga_beli = (float) $_POST['harga_beli'];
     $harga_jual = (float) $_POST['harga_jual'];
     $minimal    = (int)   $_POST['minimal_pembelian'];
     $supplier   = (int)   $_POST['supplier_id'];
-    $stok_baru  = (int)   $_POST['stok']; // Ambil nilai stok baru
+    $stok_baru  = (int)   $_POST['stok'];
     $updGambar  = '';
-    
-    // Dapatkan stok lama
-    $old_stok = query("SELECT stok FROM products WHERE id=$id")->fetch_assoc()['stok'];
-    
-    // Hitung perubahan stok
+
+    // Dapatkan data lama
+    $row = query("SELECT stok, gambar, supplier_id FROM products WHERE id=$id")->fetch_assoc();
+    $old_stok     = (int)$row['stok'];
+    $old_supplier = (int)$row['supplier_id'];
+
+    // Hitung perubahan stok (jika perlu update supplier stok)
     $stok_change = $stok_baru - $old_stok;
 
+    // Handle upload gambar baru
     if (!empty($_FILES['gambar']['name'])) {
         $newG = uploadGambar();
         if ($newG) {
             // hapus file lama
-            $old = query("SELECT gambar FROM products WHERE id=$id")->fetch_assoc()['gambar'];
-            if ($old && file_exists(__DIR__ . '/../uploads/' . $old)) {
-                unlink(__DIR__ . '/../uploads/' . $old);
+            if ($row['gambar'] && file_exists(__DIR__ . '/../uploads/' . $row['gambar'])) {
+                unlink(__DIR__ . '/../uploads/' . $row['gambar']);
             }
             $updGambar = ", gambar='$newG'";
         }
     }
 
-    // Update produk dengan stok baru
-    query("UPDATE products SET
-        nama='$nama',
-        deskripsi='$deskripsi',
-        harga_beli=$harga_beli,
-        harga_jual=$harga_jual,
-        minimal_pembelian=$minimal,
-        supplier_id=$supplier,
-        stok=$stok_baru
-        $updGambar
-        WHERE id=$id
-    ");
-    
-    // Jika stok berkurang, tambahkan ke supplier
-    if ($stok_change < 0) {
-        $amount = abs($stok_change);
-        query("UPDATE suppliers SET stok = stok + $amount WHERE id = $supplier");
+    $conn->begin_transaction();
+    try {
+        // Update produk
+        query("UPDATE products SET
+            nama='$nama',
+            deskripsi='$deskripsi',
+            harga_beli=$harga_beli,
+            harga_jual=$harga_jual,
+            minimal_pembelian=$minimal,
+            supplier_id=$supplier,
+            stok=$stok_baru
+            $updGambar
+            WHERE id=$id");
+
+        // Jika supplier berganti atau stok berkurang, sesuaikan stok supplier
+        if ($supplier !== $old_supplier) {
+            // kembalikan stok lama ke supplier lama
+            query("UPDATE suppliers SET stok=stok+$old_stok WHERE id=$old_supplier");
+            // tambahkan stok baru ke supplier baru
+            query("UPDATE suppliers SET stok=stok+$stok_baru WHERE id=$supplier");
+        } elseif ($stok_change < 0) {
+            // stok berkurang, kembalikan selisih ke supplier
+            query("UPDATE suppliers SET stok=stok+" . abs($stok_change) . " WHERE id=$supplier");
+        }
+
+        $conn->commit();
+        $_SESSION['success'] = 'Produk berhasil diubah';
+    } catch (Exception $e) {
+        $conn->rollback();
+        $_SESSION['error'] = 'Gagal mengubah produk: ' . $e->getMessage();
     }
-    
-    $_SESSION['success'] = 'Produk berhasil diubah';
     header('Location: products.php');
     exit;
 }
@@ -93,28 +104,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit'])) {
 if (isset($_GET['hapus'])) {
     $id = (int) $_GET['hapus'];
     $row = query("SELECT gambar, stok, supplier_id FROM products WHERE id=$id")->fetch_assoc();
-    
-    // Kembalikan stok ke supplier
-    if ($row['stok'] > 0) {
-        $supplier_id = $row['supplier_id'];
-        query("UPDATE suppliers SET stok = stok + {$row['stok']} WHERE id = $supplier_id");
+
+    $conn->begin_transaction();
+    try {
+        // kembalikan stok ke supplier
+        if ((int)$row['stok'] > 0) {
+            query("UPDATE suppliers SET stok=stok+{$row['stok']} WHERE id={$row['supplier_id']}");
+        }
+        // hapus gambar
+        if ($row['gambar'] && file_exists(__DIR__ . '/../uploads/' . $row['gambar'])) {
+            unlink(__DIR__ . '/../uploads/' . $row['gambar']);
+        }
+        // hapus produk
+        query("DELETE FROM products WHERE id=$id");
+
+        $conn->commit();
+        $_SESSION['success'] = 'Produk berhasil dihapus dan stok dikembalikan';
+    } catch (Exception $e) {
+        $conn->rollback();
+        $_SESSION['error'] = 'Gagal menghapus produk: ' . $e->getMessage();
     }
-    
-    // Hapus gambar
-    if ($row['gambar'] && file_exists(__DIR__ . '/../uploads/' . $row['gambar'])) {
-        unlink(__DIR__ . '/../uploads/' . $row['gambar']);
-    }
-    
-    query("DELETE FROM products WHERE id=$id");
-    $_SESSION['success'] = 'Produk berhasil dihapus dan stok dikembalikan';
     header('Location: products.php');
     exit;
 }
 
 // Ambil data
-$products  = query("SELECT p.*, s.nama AS supplier
-                    FROM products p
-                    LEFT JOIN suppliers s ON p.supplier_id = s.id
+$products  = query("SELECT p.*, s.nama AS supplier, p.supplier_id FROM products p
+                    LEFT JOIN suppliers s ON p.supplier_id=s.id
                     ORDER BY p.nama ASC");
 $suppliers = query("SELECT * FROM suppliers ORDER BY nama ASC");
 ?>
@@ -122,18 +138,17 @@ $suppliers = query("SELECT * FROM suppliers ORDER BY nama ASC");
 <div class="container-fluid">
   <h1 class="h3 mb-4 text-gray-800">Manajemen Produk</h1>
 
-  <?php if (isset($_SESSION['error'])): ?>
+  <!-- Alerts -->
+  <?php if (!empty($_SESSION['error'])): ?>
     <div class="alert alert-danger"><?= $_SESSION['error']; unset($_SESSION['error']); ?></div>
   <?php endif; ?>
-  <?php if (isset($_SESSION['success'])): ?>
+  <?php if (!empty($_SESSION['success'])): ?>
     <div class="alert alert-success"><?= $_SESSION['success']; unset($_SESSION['success']); ?></div>
   <?php endif; ?>
 
   <!-- Form Tambah Produk -->
   <div class="card shadow mb-4">
-    <div class="card-header py-3">
-      <strong>Tambah Produk Baru</strong>
-    </div>
+    <div class="card-header py-3"><strong>Tambah Produk Baru</strong></div>
     <div class="card-body">
       <form method="post" enctype="multipart/form-data">
         <div class="form-row">
@@ -153,8 +168,7 @@ $suppliers = query("SELECT * FROM suppliers ORDER BY nama ASC");
             <label>Min. Pembelian</label>
             <input type="number" name="minimal_pembelian" class="form-control" value="1" min="1" required>
           </div>
-          <div class="form-group col-md-1">
-            <label>&nbsp;</label>
+          <div class="form-group col-md-1 d-flex align-items-end">
             <button type="submit" name="tambah" class="btn btn-success btn-block">Simpan</button>
           </div>
         </div>
@@ -164,7 +178,7 @@ $suppliers = query("SELECT * FROM suppliers ORDER BY nama ASC");
             <select name="supplier_id" class="form-control" required>
               <option value="">-- Pilih Supplier --</option>
               <?php while ($s = $suppliers->fetch_assoc()): ?>
-                <option value="<?= $s['id'] ?>"><?= $s['nama'] ?></option>
+                <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['nama']) ?></option>
               <?php endwhile; ?>
             </select>
           </div>
@@ -182,159 +196,98 @@ $suppliers = query("SELECT * FROM suppliers ORDER BY nama ASC");
   </div>
 
   <!-- Tabel Produk -->
-<div class="card shadow mb-4">
-  <div class="card-body table-responsive">
-    <table class="table table-bordered">
-      <thead>
-        <tr>
-          <th>Gambar</th>
-          <th>Nama</th>
-          <th>Harga Beli</th>
-          <th>Harga Jual</th>
-          <th>Stok</th>
-          <th>Min. Beli</th>
-          <th>Supplier</th>
-          <th>Aksi</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php while ($p = $products->fetch_assoc()): ?>
+  <div class="card shadow mb-4">
+    <div class="card-body table-responsive">
+      <table class="table table-bordered" width="100%">
+        <thead>
           <tr>
-            <td>
-              <?php if ($p['gambar']): ?>
-                <img src="../uploads/<?= $p['gambar'] ?>" class="img-thumbnail" style="width:80px;height:80px;">
-              <?php endif; ?>
-            </td>
-            <td><?= $p['nama'] ?></td>
+            <th>Gambar</th><th>Nama</th><th>Harga Beli</th><th>Harga Jual</th>
+            <th>Stok</th><th>Min. Beli</th><th>Supplier</th><th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php while ($p = $products->fetch_assoc()): ?>
+          <tr>
+            <td><?php if ($p['gambar']): ?><img src="../uploads/<?= htmlspecialchars($p['gambar']) ?>" class="img-thumbnail" style="width:60px;height:60px;"><?php endif; ?></td>
+            <td><?= htmlspecialchars($p['nama']) ?></td>
             <td>Rp<?= number_format($p['harga_beli'],0,',','.') ?></td>
             <td>Rp<?= number_format($p['harga_jual'],0,',','.') ?></td>
             <td><?= $p['stok'] ?></td>
             <td><?= $p['minimal_pembelian'] ?></td>
-            <td><?= $p['supplier'] ?: '-' ?></td>
+            <td><?= htmlspecialchars($p['supplier'] ?? '-') ?></td>
             <td>
-              <!-- Pastikan semua atribut data ada -->
-              <button class="btn btn-sm btn-warning edit-btn" 
-                      data-id="<?= $p['id'] ?>"
-                      data-nama="<?= htmlspecialchars($p['nama']) ?>"
-                      data-deskripsi="<?= htmlspecialchars($p['deskripsi']) ?>"
-                      data-harga_beli="<?= $p['harga_beli'] ?>"
-                      data-harga_jual="<?= $p['harga_jual'] ?>"
-                      data-minimal="<?= $p['minimal_pembelian'] ?>"
-                      data-supplier="<?= $p['supplier_id'] ?>"
-                      data-stok="<?= $p['stok'] ?>"> <!-- Pastikan atribut ini ada -->
-                Edit
-              </button>
-              <a href="?hapus=<?= $p['id'] ?>" class="btn btn-sm btn-danger delete-btn" onclick="return confirm('Hapus produk dan kembalikan stok?')">Hapus</a>
+              <button class="btn btn-sm btn-warning edit-btn"
+                data-id="<?= $p['id'] ?>"
+                data-nama="<?= htmlspecialchars($p['nama']) ?>"
+                data-deskripsi="<?= htmlspecialchars($p['deskripsi']) ?>"
+                data-harga_beli="<?= $p['harga_beli'] ?>"
+                data-harga_jual="<?= $p['harga_jual'] ?>"
+                data-minimal_pembelian="<?= $p['minimal_pembelian'] ?>"
+                data-supplier_id="<?= $p['supplier_id'] ?>"
+                data-stok="<?= $p['stok'] ?>"
+                >Edit</button>
+              <a href="?hapus=<?= $p['id'] ?>" class="btn btn-sm btn-danger delete-btn">Hapus</a>
             </td>
           </tr>
-        <?php endwhile; ?>
-      </tbody>
-    </table>
+          <?php endwhile; ?>
+        </tbody>
+      </table>
+    </div>
   </div>
+
+  <!-- Modal Edit Produk -->
+  <div class="modal fade" id="editModal" tabindex="-1" role="dialog" aria-labelledby="editModalLabel" aria-hidden="true">
+    <div class="modal-dialog" role="document">
+      <form method="post" enctype="multipart/form-data" class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="editModalLabel">Edit Produk</h5>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="id" id="edit_id">
+          <div class="form-group"><label>Nama</label><input type="text" name="nama" id="edit_nama" class="form-control" required></div>
+          <div class="form-group"><label>Deskripsi</label><textarea name="deskripsi" id="edit_deskripsi" class="form-control" rows="2"></textarea></div>
+          <div class="form-group"><label>Stok</label><input type="number" name="stok" id="edit_stok" class="form-control" min="0" required></div>
+          <div class="form-row">
+            <div class="form-group col-md-6"><label>Harga Beli</label><input type="number" name="harga_beli" id="edit_harga_beli" class="form-control" step="0.01" required></div>
+            <div class="form-group col-md=6"><label>Harga Jual</label><input type="number" name="harga_jual" id="edit_harga_jual" class="form-control" step="0.01" required></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group col-md-6"><label>Min. Pembelian</label><input type="number" name="minimal_pembelian" id="edit_minimal" class="form-control" min="1" required></div>
+            <div class="form-group col-md-6"><label>Supplier</label><select name="supplier_id" id="edit_supplier" class="form-control" required><option value="">-- Pilih Supplier --</option><?php
+              $sup2 = query("SELECT * FROM suppliers ORDER BY nama ASC"); while($s2=$sup2->fetch_assoc()): ?><option value="<?= $s2['id'] ?>"><?= htmlspecialchars($s2['nama']) ?></option><?php endwhile; ?></select></div>
+          </div>
+          <div class="form-group"><label>Ganti Gambar</label><input type="file" name="gambar" class="form-control-file"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-dismiss="modal">Batal</button>
+          <button type="submit" name="edit" class="btn btn-primary">Simpan Perubahan</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <?php include __DIR__ . '/../includes/footer.php'; ?>
 </div>
 
-<!-- Modal Edit Produk -->
-<div class="modal fade" id="editModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
-    <form method="post" enctype="multipart/form-data" class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Edit Produk</h5>
-        <button type="button" class="close" data-dismiss="modal">&times;</button>
-      </div>
-      <div class="modal-body">
-        <input type="hidden" name="id" id="edit_id">
-        <div class="form-group">
-          <label>Nama</label>
-          <input type="text" name="nama" id="edit_nama" class="form-control" required>
-        </div>
-        <div class="form-group">
-          <label>Deskripsi</label>
-          <textarea name="deskripsi" id="edit_deskripsi" class="form-control" rows="2"></textarea>
-        </div>
-        <div class="form-group">
-          <label>Stok</label>
-          <input type="number" name="stok" id="edit_stok" class="form-control" min="0" required>
-        </div>
-        <div class="form-row">
-          <div class="form-group col-md-6">
-            <label>Harga Beli</label>
-            <input type="number" name="harga_beli" id="edit_harga_beli" class="form-control" step="0.01" required>
-          </div>
-          <div class="form-group col-md-6">
-            <label>Harga Jual</label>
-            <input type="number" name="harga_jual" id="edit_harga_jual" class="form-control" step="0.01" required>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group col-md-6">
-            <label>Min. Pembelian</label>
-            <input type="number" name="minimal_pembelian" id="edit_minimal" class="form-control" min="1" required>
-          </div>
-          <div class="form-group col-md-6">
-            <label>Supplier</label>
-            <select name="supplier_id" id="edit_supplier" class="form-control" required>
-              <option value="">-- Pilih --</option>
-              <?php
-              $suppliers2 = query("SELECT * FROM suppliers ORDER BY nama ASC");
-              while ($s2 = $suppliers2->fetch_assoc()):
-              ?>
-                <option value="<?= $s2['id'] ?>"><?= $s2['nama'] ?></option>
-              <?php endwhile; ?>
-            </select>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Ganti Gambar</label>
-          <input type="file" name="gambar" class="form-control-file">
-          <small class="form-text text-muted">Kosongkan jika tidak ingin mengganti.</small>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-dismiss="modal">Batal</button>
-        <button type="submit" name="edit" class="btn btn-primary">Simpan Perubahan</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.0/assets/js/bootstrap.bundle.min.js"></script>
+<script src="../assets/vendor/jquery/jquery.min.js"></script>
+<script src="../assets/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
 <script>
-$(document).ready(function() {
-  // Pastikan menggunakan event delegation yang benar
-  $(document).on('click', '.edit-btn', function() {
-    // Ambil semua data dari tombol yang diklik
-    var id = $(this).data('id');
-    var nama = $(this).data('nama');
-    var deskripsi = $(this).data('deskripsi');
-    var harga_beli = $(this).data('harga_beli');
-    var harga_jual = $(this).data('harga_jual');
-    var minimal = $(this).data('minimal');
-    var supplier = $(this).data('supplier');
-    var stok = $(this).data('stok');
-    
-    // Set nilai ke form modal
-    $('#edit_id').val(id);
-    $('#edit_nama').val(nama);
-    $('#edit_deskripsi').val(deskripsi);
-    $('#edit_harga_beli').val(harga_beli);
-    $('#edit_harga_jual').val(harga_jual);
-    $('#edit_minimal').val(minimal);
-    $('#edit_supplier').val(supplier);
-    $('#edit_stok').val(stok);
-    
-    // Tampilkan modal
-    $('#editModal').modal('show');
-  });
+$(document).on('click', '.edit-btn', function() {
+  $('#edit_id').val($(this).data('id'));
+  $('#edit_nama').val($(this).data('nama'));
+  $('#edit_deskripsi').val($(this).data('deskripsi'));
+  $('#edit_stok').val($(this).data('stok'));
+  $('#edit_harga_beli').val($(this).data('harga_beli'));
+  $('#edit_harga_jual').val($(this).data('harga_jual'));
+  $('#edit_minimal').val($(this).data('minimal_pembelian'));
+  $('#edit_supplier').val($(this).data('supplier_id'));
+  $('#editModal').modal('show');
+});
 
-  // Konfirmasi hapus
-  $('.delete-btn').click(function(e) {
-    if (!confirm('Yakin hapus produk dan kembalikan stok?')) {
-      e.preventDefault();
-    }
-  });
+$(document).on('click', '.delete-btn', function() {
+  return confirm('Yakin hapus produk dan kembalikan stok?');
 });
 </script>
-
-<?php
-include __DIR__ . '/../includes/footer.php';
